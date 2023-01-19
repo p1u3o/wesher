@@ -1,15 +1,18 @@
 package wg
 
 import (
+	"fmt"
 	"hash/fnv"
 	"net"
 	"os"
+	"time"
 
 	"github.com/costela/wesher/common"
 	"github.com/pkg/errors"
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+	"github.com/sirupsen/logrus"
 )
 
 // State holds the configured state of a Wesher Wireguard interface
@@ -21,12 +24,13 @@ type State struct {
 	PrivKey     wgtypes.Key
 	PubKey      wgtypes.Key
 	MTU         int
+	KeepaliveInterval *time.Duration
 }
 
 // New creates a new Wesher Wireguard state
 // The Wireguard keys are generated for every new interface
 // The interface must later be setup using SetUpInterface
-func New(iface string, port int, mtu int, ipnet *net.IPNet, name string) (*State, *common.Node, error) {
+func New(iface string, port int, mtu int, ipnet *net.IPNet, name string, keepaliveInterval *time.Duration) (*State, *common.Node, error) {
 	client, err := wgctrl.New()
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "could not instantiate wireguard client")
@@ -45,6 +49,7 @@ func New(iface string, port int, mtu int, ipnet *net.IPNet, name string) (*State
 		PrivKey: privKey,
 		PubKey:  pubKey,
 		MTU:     mtu,
+		KeepaliveInterval: keepaliveInterval,
 	}
 	state.assignOverlayAddr(ipnet, name)
 
@@ -105,13 +110,16 @@ func (s *State) SetUpInterface(nodes []common.Node, routedNet []*net.IPNet) erro
 	if err != nil {
 		return errors.Wrap(err, "error converting received node information to wireguard format")
 	}
+	
+	logrus.Infof("set wireguard configuration for %s port %s peers %s", s.iface, s.Port, peerCfgs)
+
 	if err := s.client.ConfigureDevice(s.iface, wgtypes.Config{
 		PrivateKey:   &s.PrivKey,
 		ListenPort:   &s.Port,
 		ReplacePeers: true,
 		Peers:        peerCfgs,
 	}); err != nil {
-		return errors.Wrapf(err, "could not set wireguard configuration for %s", s.iface)
+		return errors.Wrapf(err, "could not set wireguard configuration for %s port %s peers %s", s.iface, s.Port, peerCfgs)
 	}
 
 	link, err := netlink.LinkByName(s.iface)
@@ -185,8 +193,9 @@ func (s *State) nodesToPeerConfigs(nodes []common.Node) ([]wgtypes.PeerConfig, e
 	for i, node := range nodes {
 		pubKey, err := wgtypes.ParseKey(node.PubKey)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("parsing wireguard key: %w", err)
 		}
+						
 		peerCfgs[i] = wgtypes.PeerConfig{
 			PublicKey:         pubKey,
 			ReplaceAllowedIPs: true,
@@ -195,6 +204,10 @@ func (s *State) nodesToPeerConfigs(nodes []common.Node) ([]wgtypes.PeerConfig, e
 				Port: s.Port,
 			},
 			AllowedIPs: append([]net.IPNet{node.OverlayAddr}, node.Routes...),
+			//AllowedIPs: []net.IPNet{
+			//	node.OverlayAddr,
+			//},
+			PersistentKeepaliveInterval: s.KeepaliveInterval,
 		}
 	}
 	return peerCfgs, nil

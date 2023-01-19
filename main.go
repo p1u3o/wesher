@@ -35,14 +35,28 @@ func main() {
 	}
 	logrus.SetLevel(logLevel)
 
+	logrus.Infof("\tAdvertiseAddr: %s", config.AdvertiseAddr)
+
 	// Create the wireguard and cluster configuration
-	cluster, err := cluster.New(config.Interface, config.Init, config.ClusterKey, config.BindAddr, config.ClusterPort, config.UseIPAsName)
+	cluster, err := cluster.New(config.Interface, config.Init, config.ClusterKey, config.BindAddr, config.ClusterPort, config.AdvertiseAddr, config.ClusterPort, config.UseIPAsName)
 	if err != nil {
 		logrus.WithError(err).Fatal("could not create cluster")
 	}
-	wgstate, localNode, err := wg.New(config.Interface, config.WireguardPort, config.MTU, (*net.IPNet)(config.OverlayNet), cluster.LocalName)
+
+	keepaliveDuration, err := time.ParseDuration(config.KeepaliveInterval)
+	if err != nil {
+		logrus.WithError(err).Fatal("could not parse time duration for keepalive")
+	}
+
+	wgstate, localNode, err := wg.New(config.Interface, config.WireguardPort, config.MTU, (*net.IPNet)(config.OverlayNet), cluster.LocalName, &keepaliveDuration)
 	if err != nil {
 		logrus.WithError(err).Fatal("could not instantiate wireguard controller")
+	}
+
+	// Prepare the rejoin timer
+	rejoin := make(<-chan time.Time)
+	if config.Rejoin > 0 {
+		rejoin = time.Tick(time.Duration(1000000000 * config.Rejoin))
 	}
 
 	// Prepare the /etc/hosts writer
@@ -116,6 +130,9 @@ func main() {
 			logrus.Info("announcing new routes...")
 			localNode.Routes = routes
 			cluster.Update(localNode)
+		case <-rejoin:
+			logrus.Debug("rejoining missing join nodes...")
+			cluster.Join(config.Join)
 		case <-incomingSigs:
 			logrus.Info("terminating...")
 			cluster.Leave()

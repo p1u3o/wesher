@@ -6,6 +6,7 @@ import (
 
 	"github.com/costela/wesher/cluster"
 	"github.com/hashicorp/go-sockaddr"
+	"github.com/mikioh/ipaddr"
 	"github.com/pkg/errors"
 	"github.com/stevenroose/gonfig"
 )
@@ -14,9 +15,11 @@ type config struct {
 	ConfigFile       string     `id:"config" desc:"config file YAML" default:"wesher.conf"`
 	ClusterKey       []byte     `id:"cluster-key" desc:"shared key for cluster membership; must be 32 bytes base64 encoded; will be generated if not provided"`
 	Join             []string   `desc:"comma separated list of hostnames or IP addresses to existing cluster members; if not provided, will attempt resuming any known state or otherwise wait for further members."`
+	Rejoin           int      `desc:"interval at which join nodes are joined again if away, 0 disables rejoining altogether" default:"0"`
 	Init             bool       `desc:"whether to explicitly (re)initialize the cluster; any known state from previous runs will be forgotten"`
 	BindAddr         string     `id:"bind-addr" desc:"IP address to bind to for cluster membership traffic (cannot be used with --bind-iface)"`
 	BindIface        string     `id:"bind-iface" desc:"Interface to bind to for cluster membership traffic (cannot be used with --bind-addr)"`
+	AdvertiseAddr    string     `id:"advertise-addr" desc:"IP address to advertise to other nodes for NAT traversal"`
 	ClusterPort      int        `id:"cluster-port" desc:"port used for membership gossip traffic (both TCP and UDP); must be the same across cluster" default:"7946"`
 	WireguardPort    int        `id:"wireguard-port" desc:"port used for wireguard traffic (UDP); must be the same across cluster" default:"51820"`
 	MTU              int        `id:"mtu" desc:"mtu for wireguard interface" default:"1420"`
@@ -27,6 +30,7 @@ type config struct {
 	LogLevel         string     `id:"log-level" desc:"set the verbosity (debug/info/warn/error)" default:"warn"`
 	Version          bool       `desc:"display current version and exit"`
 	NodeUpdateScript string     `id:"node-update-script" desc:"path to script which is executed everytime the service receives an update for a node"`
+	KeepaliveInterval string   `id:"keepalive-interval" desc:"interval for which to send keepalive packets" default:"30s"`
 
 	// for easier local testing; will break etchosts entry
 	UseIPAsName bool `id:"ip-as-name" default:"false" opts:"hidden"`
@@ -83,6 +87,10 @@ func loadConfig() (*config, error) {
 		} else {
 			config.BindAddr = "0.0.0.0"
 		}
+	}
+
+	if _, err := ipaddr.Parse(config.AdvertiseAddr); err != nil {
+		config.AdvertiseAddr = ""
 	}
 
 	return &config, nil

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 	"time"
-
+	"net"
 	"github.com/costela/wesher/common"
 	"github.com/hashicorp/memberlist"
 	"github.com/mattn/go-isatty"
@@ -30,7 +30,7 @@ type Cluster struct {
 
 // New is used to create a new Cluster instance
 // The returned instance is ready to be updated with the local node settings then joined
-func New(name string, init bool, clusterKey []byte, bindAddr string, bindPort int, useIPAsName bool) (*Cluster, error) {
+func New(name string, init bool, clusterKey []byte, bindAddr string, bindPort int, advertiseAddr string, advertisePort int, useIPAsName bool) (*Cluster, error) {
 	state := &state{}
 	if !init {
 		loadState(state, name)
@@ -38,7 +38,7 @@ func New(name string, init bool, clusterKey []byte, bindAddr string, bindPort in
 
 	clusterKey, err := computeClusterKey(state, clusterKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("computing cluster key: %w", err)
 	}
 
 	mlConfig := memberlist.DefaultWANConfig()
@@ -46,14 +46,16 @@ func New(name string, init bool, clusterKey []byte, bindAddr string, bindPort in
 	mlConfig.SecretKey = clusterKey
 	mlConfig.BindAddr = bindAddr
 	mlConfig.BindPort = bindPort
-	mlConfig.AdvertisePort = bindPort
+	mlConfig.AdvertiseAddr = advertiseAddr
+	mlConfig.AdvertisePort = advertisePort
+	
 	if useIPAsName && bindAddr != "0.0.0.0" {
 		mlConfig.Name = bindAddr
 	}
 
 	ml, err := memberlist.Create(mlConfig)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating memberlist: %w", err)
 	}
 
 	cluster := Cluster{
@@ -74,21 +76,46 @@ func (c *Cluster) Name() string {
 	return c.localNode.Name
 }
 
-// Join tries to join the cluster by contacting provided addresses
-// Provided addresses are passed as is, if no address is provided, known
-// cluster nodes are contacted instead.
-// Joining fail if none of the provided addresses or none of the known
-// nodes can be joined.
-func (c *Cluster) Join(addrs []string) error {
-	if len(addrs) == 0 {
-		for _, n := range c.state.Nodes {
-			addrs = append(addrs, n.Addr.String())
+// Join tries to join the cluster by contacting provided ips.
+// If no ip is provided, ips of known nodes are used instead.
+// Only addresses that are not already members are joined.
+func (c *Cluster) Join(hosts []string) error {
+	addrs := make([]net.IP, 0, len(hosts))
+
+	// resolve hostnames so we are able to proerly filter out
+	// cluster members later
+	for _, host := range hosts {
+		if addr := net.ParseIP(host); addr != nil {
+			addrs = append(addrs, addr)
+		} else if ips, err := net.LookupIP(host); err == nil {
+			addrs = append(addrs, ips...)
 		}
 	}
 
-	if _, err := c.ml.Join(addrs); err != nil {
-		return err
-	} else if len(addrs) > 0 && c.ml.NumMembers() < 2 {
+	// add known hosts if necessary
+	if len(addrs) == 0 {
+		for _, n := range c.state.Nodes {
+			addrs = append(addrs, n.Addr)
+				}
+			}
+		
+			// filter out addresses that are already members
+			targets := make([]string, 0, len(addrs))
+			members := c.ml.Members()
+		AddrLoop:
+			for _, addr := range addrs {
+				for _, member := range members {
+					if member.Addr.Equal(addr) {
+						continue AddrLoop
+					}
+				}
+				targets = append(targets, addr.String())
+			}
+		
+			// finally try and join any remaining address
+			if _, err := c.ml.Join(targets); err != nil {
+				return fmt.Errorf("joining cluster: %w", err)
+			} else if len(targets) > 0 && c.ml.NumMembers() < 2 {
 		return errors.New("could not join to any of the provided addresses")
 	}
 	return nil
@@ -146,7 +173,7 @@ func (c *Cluster) Members() <-chan []common.Node {
 			}
 			c.state.Nodes = nodes
 			changes <- nodes
-			c.state.save(c.name)
+			c.state.save(c.name) // nolint: errcheck // opportunistic
 		}
 	}()
 	return changes
@@ -160,7 +187,7 @@ func computeClusterKey(state *state, clusterKey []byte) ([]byte, error) {
 		clusterKey = make([]byte, KeyLen)
 		_, err := rand.Read(clusterKey)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("reading random source: %w", err)
 		}
 		// TODO: refactor this into subcommand ("showkey"?)
 		if isatty.IsTerminal(os.Stdout.Fd()) {
